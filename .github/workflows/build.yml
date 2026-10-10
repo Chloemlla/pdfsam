@@ -47,3 +47,25 @@ jobs:
     - name: Build with Maven
       if: matrix.os != 'ubuntu-latest' && matrix.os != 'macos-15-intel'
       run: mvn --batch-mode --update-snapshots verify
+
+    # Package the platform release output (portable zip/tar.gz, deb, dmg) so it can be
+    # downloaded from the run. `-Drelease` enables the platform packaging profiles and
+    # stops at `package`: the code sign / notarize steps live in the integration-test
+    # phases and need Apple/Azure secrets, which are only wired in release.yml.
+    - name: Package release artifacts
+      continue-on-error: true
+      run: mvn --batch-mode --update-snapshots -DskipTests -Drelease -Dgpg.skip=true -Dmaven.javadoc.skip=true package
+
+    - name: Upload artifacts
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: pdfsam-basic-${{ matrix.os }}
+        if-no-files-found: error
+        path: |
+          pdfsam-basic/target/*.zip
+          pdfsam-basic/target/*.tar.gz
+          pdfsam-basic/target/*.deb
+          pdfsam-basic/target/*.msi
+          pdfsam-basic/target/*.msix
+          pdfsam-basic/target/*.dmg
