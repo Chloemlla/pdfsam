@@ -569,6 +569,11 @@
                                     <goal>exec</goal>
                                 </goals>
                                 <configuration>
+                                    <!-- the app-image/dmg need an Apple code signing identity, which
+                                         release.yml imports from secrets; a build without it can skip
+                                         this execution with -Dmac.jpackage.skip=true and still get
+                                         the portable zip -->
+                                    <skip>${mac.jpackage.skip}</skip>
                                     <executable>jpackage</executable>
                                     <workingDirectory>${project.build.directory}</workingDirectory>
                                     <longModulepath>false</longModulepath>
@@ -666,6 +671,9 @@
                     </plugin>
                 </plugins>
             </build>
+            <properties>
+                <mac.jpackage.skip>false</mac.jpackage.skip>
+            </properties>
         </profile>
     </profiles>
 
