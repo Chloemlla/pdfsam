@@ -1,13 +1,75 @@
 name: build
 
-on: [push]
+# Multi-platform build and GitHub Release for this fork, on the same three
+# triggers as the release pipeline this workflow replicates:
+#
+#  - push a tag like `v6.0.7` -> builds every platform and attaches the packages
+#    to the GitHub Release for that tag;
+#  - push to `master`         -> real-time multi-platform build, and when all of
+#    them succeed the packages are published straight away as the official
+#    release of the version declared in `pdfsam-basic/pom.xml`: tagged
+#    `v<version>`, named after that version and marked "Latest". A second push
+#    without a version bump updates that same release (assets are overwritten),
+#    so "Latest" always points at the newest successful build of `master`.
+#    Note that `master` declares a `-SNAPSHOT` version, so until it is bumped the
+#    auto release tag carries that suffix (`v6.0.7-SNAPSHOT`).
+#  - run manually (workflow_dispatch) -> builds every platform and keeps the
+#    packages as downloadable workflow artifacts, without creating a release.
+#
+# The packages built here are unsigned: signing and notarization need the GPG,
+# Apple and Azure Trusted Signing credentials that only live in `release.yml`.
+# That is why Windows/macOS code signing and the macOS jpackage/notarize steps
+# are skipped explicitly below, and the portable archives are the assets this
+# workflow can produce.
+on:
+  push:
+    tags: ["v*"]
+    branches: [master]
+  workflow_dispatch:
 
 permissions:
-  contents: read
-  
+  contents: write # needed to create and update the GitHub Release
+
 jobs:
+  check-version:
+    name: Check tag version
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    # The version lives in the `pdfsam-basic` module, inherited from the root
+    # pom, so that is what a release tag has to match. A fork tag may carry a
+    # suffix after the version so the same revision can be released more than
+    # once: v6.0.7, v6.0.7-zh.1, ...
+    - name: Ensure tag matches the project version
+      if: startsWith(github.ref, 'refs/tags/')
+      shell: bash
+      run: |
+        set -eu
+        TAG_VERSION="${GITHUB_REF_NAME#v}"
+        ROOT_VERSION="$(sed -n '/<artifactId>pdfsam-parent<\/artifactId>/,/<\/version>/ s/.*<version>\(.*\)<\/version>.*/\1/p' pom.xml | head -n 1)"
+        APP_VERSION="$(sed -n '/<artifactId>pdfsam-parent<\/artifactId>/,/<\/parent>/ s/.*<version>\(.*\)<\/version>.*/\1/p' pdfsam-basic/pom.xml | head -n 1)"
+        [ -n "$ROOT_VERSION" ] || { echo "could not read the version from pom.xml"; exit 1; }
+        [ -n "$APP_VERSION" ] || { echo "could not read the version from pdfsam-basic/pom.xml"; exit 1; }
+        if [ "$ROOT_VERSION" != "$APP_VERSION" ]; then
+          echo "pdfsam-basic/pom.xml inherits ${APP_VERSION}, but pom.xml declares ${ROOT_VERSION}."
+          echo "Align the module version before tagging."
+          exit 1
+        fi
+        case "$TAG_VERSION" in
+          "$ROOT_VERSION"|"$ROOT_VERSION"-*) ;;
+          *)
+            echo "Tag ${GITHUB_REF_NAME} does not start with the project version ${ROOT_VERSION}."
+            echo "Use v${ROOT_VERSION} or v${ROOT_VERSION}-<suffix>."
+            exit 1
+            ;;
+        esac
+
   build:
     runs-on: ${{ matrix.os }}
+    needs: check-version
     strategy:
       fail-fast: false
       matrix:
@@ -50,8 +112,8 @@ jobs:
       run: mvn --batch-mode --update-snapshots verify
 
     # Package the platform release output (portable zip/tar.gz, deb) so it can be
-    # downloaded from the run. `-Drelease` enables the platform packaging profiles and
-    # the build stops at `package`: code sign and notarize steps live in the
+    # published. `-Drelease` enables the platform packaging profiles and the build
+    # stops at `package`: code sign and notarize steps live in the
     # integration-test phases and are only wired up in release.yml. For the same reason
     # the Windows and mac code signing is skipped here, their portable archives are the
     # assets CI can produce.
@@ -61,16 +123,117 @@ jobs:
       shell: bash
       run: mvn --batch-mode --update-snapshots -DskipTests -Drelease "-Dgpg.skip=true" "-Dmaven.javadoc.skip=true" "-Dwin.sign.skip=true" "-Dmac.jpackage.skip=true" package
 
+    # Collect whatever this platform produced into dist/, so that one file list
+    # feeds both the workflow artifact and (on a tag) the GitHub Release. The
+    # artifact names already carry the project version and the platform
+    # classifier, so nothing has to be relabelled afterwards.
+    - name: Collect platform packages
+      shell: bash
+      run: |
+        set -eu
+        shopt -s nullglob
+        rm -rf dist
+        mkdir -p dist
+        found=0
+        for file in pdfsam-basic/target/*.zip pdfsam-basic/target/*.tar.gz \
+                    pdfsam-basic/target/*.deb pdfsam-basic/target/*.msi \
+                    pdfsam-basic/target/*.msix pdfsam-basic/target/*.dmg; do
+          cp "$file" dist/
+          found=$((found + 1))
+        done
+        if [ "$found" -eq 0 ]; then
+          echo "no package was produced on ${{ matrix.os }}" >&2
+          exit 1
+        fi
+        echo "Packaged artifacts:"
+        ls -lh dist
+
     - name: Upload artifacts
       if: always()
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: pdfsam-basic-${{ matrix.os }}
         if-no-files-found: error
-        path: |
-          pdfsam-basic/target/*.zip
-          pdfsam-basic/target/*.tar.gz
-          pdfsam-basic/target/*.deb
-          pdfsam-basic/target/*.msi
-          pdfsam-basic/target/*.msix
-          pdfsam-basic/target/*.dmg
+        path: dist/*
+
+    # A tag push is the official release of that build, so every platform job
+    # attaches its own packages to the same release: whoever finishes first
+    # creates it (the action updates an already existing tag instead of failing),
+    # the others just add their assets.
+    - name: Attach to GitHub Release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+      with:
+        files: dist/*
+        fail_on_unmatched_files: true
+        draft: false
+        # A fork tag is the official release of that build, so it is never a
+        # prerelease and is allowed to take over the "Latest" badge.
+        prerelease: false
+        make_latest: true
+
+  # Publishing step for real-time builds on `master`: collect every platform
+  # package and publish them immediately as the official release of the version
+  # currently declared in `pdfsam-basic/pom.xml` - tag `v<version>`, marked
+  # "Latest", neither a draft nor a prerelease. Re-running it for the same version
+  # updates that same release and overwrites its assets, which keeps "Latest" on
+  # the newest successful `master` build. Tag pushes keep their own release path,
+  # and manual dispatches stay artifact-only.
+  publish-release:
+    name: publish-release
+    needs: build
+    if: github.event_name == 'push' && github.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Compute release version
+      id: release
+      shell: bash
+      run: |
+        set -eu
+        VERSION="$(sed -n '/<artifactId>pdfsam-parent<\/artifactId>/,/<\/parent>/ s/.*<version>\(.*\)<\/version>.*/\1/p' pdfsam-basic/pom.xml | head -n 1)"
+        [ -n "$VERSION" ] || { echo "could not read the project version"; exit 1; }
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+        echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+
+    # Merge every platform artifact into a single directory; the per platform
+    # file names carry a distinct classifier, so this cannot collide.
+    - name: Download all build artifacts
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+      with:
+        path: release-assets
+        merge-multiple: true
+
+    - name: List release assets
+      shell: bash
+      run: |
+        set -eu
+        ls -lh release-assets
+
+    - name: Publish release
+      uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        tag_name: ${{ steps.release.outputs.tag }}
+        # Creates the `v<version>` tag on the very commit that was built, even if
+        # `master` has moved on while the builds were running.
+        target_commitish: ${{ github.sha }}
+        name: "PDFsam Basic ${{ steps.release.outputs.version }}"
+        body: |
+          PDFsam Basic ${{ steps.release.outputs.version }} 正式版（多平台自动构建，未签名）。
+
+          - 构建提交：`${{ github.sha }}`
+          - 构建记录：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          - 安装包见下方 Assets（Windows / macOS / Linux，x86_64 与 aarch64）
+
+          同一版本号再次构建会覆盖更新本 Release 的 Assets，"Latest" 始终指向 master 上最新一次成功的构建。
+        draft: false
+        prerelease: false
+        make_latest: true
+        overwrite_files: true
+        files: release-assets/*
