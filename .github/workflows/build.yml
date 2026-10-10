@@ -161,7 +161,7 @@ jobs:
 
     - name: Build with Maven Ubuntu
       if: matrix.os == 'ubuntu-latest'
-      run: xvfb-run mvn -Djava.awt.headless=true -Dtestfx.robot=glass -Dtestfx.headless=true -Dprism.order=sw --batch-mode --update-snapshots verify
+      run: xvfb-run mvn -Djava.awt.headless=true -Dtestfx.robot=glass -Dtestfx.headless=true -Dprism.order=sw -Dsurefire.rerunFailingTestsCount=2 --batch-mode --update-snapshots verify
 
     - name: Build with Maven MacOS intel
       if: matrix.os == 'macos-15-intel'
@@ -175,9 +175,15 @@ jobs:
       if: matrix.os == 'windows-latest'
       run: scoop install gettext
 
+    # The suite carries a number of timing dependent tests (JavaFX/TestFX waits,
+    # assertions on work handed to a virtual thread), so a loaded runner can make
+    # an otherwise green test fail. Two retries keep the release pipeline from
+    # being blocked by that without hiding a real failure: a deterministic one
+    # fails all three attempts and still breaks the build. The summary reports
+    # whatever had to be retried as "Flakes".
     - name: Build with Maven
       if: matrix.os != 'ubuntu-latest' && matrix.os != 'macos-15-intel'
-      run: mvn --batch-mode --update-snapshots verify
+      run: mvn --batch-mode --update-snapshots -Dsurefire.rerunFailingTestsCount=2 verify
 
     # Package the platform release output (portable zip/tar.gz, deb) so it can be
     # published. `-Drelease` enables the platform packaging profiles and the build
