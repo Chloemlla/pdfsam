@@ -175,6 +175,11 @@ jobs:
       if: matrix.os == 'windows-latest'
       run: scoop install gettext
 
+    # bash keeps the -D properties intact: the default PowerShell shell on Windows
+    # splits arguments on the dot ("-Dsurefire.rerunFailingTestsCount=2" is passed
+    # as "-Dsurefire .rerunFailingTestsCount=2"), and Maven then fails with
+    # "Unknown lifecycle phase ".rerunFailingTestsCount=2"".
+    #
     # The suite carries a number of timing dependent tests (JavaFX/TestFX waits,
     # assertions on work handed to a virtual thread), so a loaded runner can make
     # an otherwise green test fail. Two retries keep the release pipeline from
@@ -183,6 +188,7 @@ jobs:
     # whatever had to be retried as "Flakes".
     - name: Build with Maven
       if: matrix.os != 'ubuntu-latest' && matrix.os != 'macos-15-intel'
+      shell: bash
       run: mvn --batch-mode --update-snapshots -Dsurefire.rerunFailingTestsCount=2 verify
 
     # Package the platform release output (portable zip/tar.gz, deb) so it can be
