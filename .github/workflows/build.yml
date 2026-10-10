@@ -53,12 +53,13 @@ jobs:
     # downloaded from the run. `-Drelease` enables the platform packaging profiles and
     # the build stops at `package`: code sign and notarize steps live in the
     # integration-test phases and are only wired up in release.yml. For the same reason
-    # the mac app-image/dmg is skipped here, the portable zip is the mac asset.
+    # the Windows and mac code signing is skipped here, their portable archives are the
+    # assets CI can produce.
     - name: Package release artifacts
       # bash keeps the -D properties intact: the default PowerShell shell on Windows
       # splits arguments on the dot ("-Dgpg.skip=true" is passed as "-Dgpg .skip=true")
       shell: bash
-      run: mvn --batch-mode --update-snapshots -DskipTests -Drelease "-Dgpg.skip=true" "-Dmaven.javadoc.skip=true" "-Dmac.jpackage.skip=true" package
+      run: mvn --batch-mode --update-snapshots -DskipTests -Drelease "-Dgpg.skip=true" "-Dmaven.javadoc.skip=true" "-Dwin.sign.skip=true" "-Dmac.jpackage.skip=true" package
 
     - name: Upload artifacts
       if: always()

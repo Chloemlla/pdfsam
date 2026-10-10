@@ -321,6 +321,10 @@
                                     <goal>exec</goal>
                                 </goals>
                                 <configuration>
+                                    <!-- the binaries are signed with Azure Trusted Signing,
+                                         whose credentials live in release.yml secrets; a build
+                                         without them can skip it with -Dwin.sign.skip=true -->
+                                    <skip>${win.sign.skip}</skip>
                                     <executable>
                                         ${project.build.directory}/msi/SignExe.cmd
                                     </executable>
@@ -391,6 +395,9 @@
                     </plugin>
                 </plugins>
             </build>
+            <properties>
+                <win.sign.skip>false</win.sign.skip>
+            </properties>
         </profile>
 
         <profile>
