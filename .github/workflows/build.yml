@@ -34,15 +34,83 @@ jobs:
   check-version:
     name: Check tag version
     runs-on: ubuntu-latest
+    # The release tag, the release name and the commit list are computed once
+    # here and handed to every job that publishes, so all platforms release the
+    # very same thing.
+    outputs:
+      version: ${{ steps.project.outputs.version }}
+      changelog: ${{ steps.commits.outputs.changelog }}
+      tag: ${{ steps.project.outputs.tag }}
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         persist-credentials: false
+        # The commit list below walks the history back to the previous tag, so
+        # this clone cannot be shallow.
+        fetch-depth: 0
 
     # The version lives in the `pdfsam-basic` module, inherited from the root
-    # pom, so that is what a release tag has to match. A fork tag may carry a
-    # suffix after the version so the same revision can be released more than
-    # once: v6.0.7, v6.0.7-zh.1, ...
+    # pom. An already pushed tag is what will be released, otherwise the version
+    # is released as `v<version>`.
+    - name: Read the project version
+      id: project
+      shell: bash
+      run: |
+        set -eu
+        VERSION="$(sed -n '/<artifactId>pdfsam-parent<\/artifactId>/,/<\/parent>/ s/.*<version>\(.*\)<\/version>.*/\1/p' pdfsam-basic/pom.xml | head -n 1)"
+        [ -n "$VERSION" ] || { echo "could not read the project version"; exit 1; }
+        echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+        if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+          echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+        else
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+        fi
+
+    # Every release body lists the commits it was built from: a tag lists
+    # everything since the previous tag, a branch push everything the push
+    # brought in, a manual run the newest commits of the checked out revision.
+    - name: Collect commits
+      id: commits
+      shell: bash
+      env:
+        BEFORE: ${{ github.event.before }}
+        AFTER: ${{ github.sha }}
+      run: |
+        set -eu
+        RANGE=""
+        if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+          # `git describe` on the parent skips the tag being released itself.
+          PREVIOUS="$(git describe --tags --abbrev=0 "${AFTER}^" 2>/dev/null || true)"
+          if [ -n "$PREVIOUS" ] && git merge-base --is-ancestor "$PREVIOUS" "$AFTER"; then
+            RANGE="${PREVIOUS}..${AFTER}"
+          fi
+        fi
+        if [ -z "$RANGE" ] && [ -n "${BEFORE:-}" ] && [ "${BEFORE//0/}" != "" ] && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+          RANGE="${BEFORE}..${AFTER}"
+        fi
+        if [ -z "$RANGE" ]; then
+          # No usable range: first tag of the repository, or a force push that
+          # orphaned the previous head. Fall back to the newest commits.
+          BASE="$(git rev-parse "${AFTER}~50" 2>/dev/null || true)"
+          if [ -n "$BASE" ]; then RANGE="${BASE}..${AFTER}"; else RANGE="$AFTER"; fi
+        fi
+        COUNT="$(git rev-list --count "$RANGE")"
+        {
+          echo "changelog<<CHANGELOG_EOF"
+          echo "### 本次构建包含的提交（共 ${COUNT} 条）"
+          echo
+          git log --max-count=200 --pretty=format:'- %s (`%h`)' "$RANGE"
+          if [ "$COUNT" -gt 200 ]; then
+            echo
+            echo
+            echo "（提交较多，仅列出最近 200 条）"
+          fi
+          echo
+          echo "CHANGELOG_EOF"
+        } >> "$GITHUB_OUTPUT"
+
+    # A fork tag may carry a suffix after the version so the same revision can be
+    # released more than once: v6.0.7, v6.0.7-zh.1, ...
     - name: Ensure tag matches the project version
       if: startsWith(github.ref, 'refs/tags/')
       shell: bash
@@ -50,7 +118,7 @@ jobs:
         set -eu
         TAG_VERSION="${GITHUB_REF_NAME#v}"
         ROOT_VERSION="$(sed -n '/<artifactId>pdfsam-parent<\/artifactId>/,/<\/version>/ s/.*<version>\(.*\)<\/version>.*/\1/p' pom.xml | head -n 1)"
-        APP_VERSION="$(sed -n '/<artifactId>pdfsam-parent<\/artifactId>/,/<\/parent>/ s/.*<version>\(.*\)<\/version>.*/\1/p' pdfsam-basic/pom.xml | head -n 1)"
+        APP_VERSION="${{ steps.project.outputs.version }}"
         [ -n "$ROOT_VERSION" ] || { echo "could not read the version from pom.xml"; exit 1; }
         [ -n "$APP_VERSION" ] || { echo "could not read the version from pdfsam-basic/pom.xml"; exit 1; }
         if [ "$ROOT_VERSION" != "$APP_VERSION" ]; then
@@ -159,7 +227,8 @@ jobs:
     # A tag push is the official release of that build, so every platform job
     # attaches its own packages to the same release: whoever finishes first
     # creates it (the action updates an already existing tag instead of failing),
-    # the others just add their assets.
+    # the others just add their assets. The body is identical in every platform
+    # job, so the concurrent updates cannot disagree.
     - name: Attach to GitHub Release
       if: startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
@@ -171,6 +240,15 @@ jobs:
         # prerelease and is allowed to take over the "Latest" badge.
         prerelease: false
         make_latest: true
+        name: "PDFsam Basic ${{ needs.check-version.outputs.version }}"
+        body: |
+          PDFsam Basic ${{ needs.check-version.outputs.version }}（多平台自动构建，未签名）。
+
+          - 构建提交：`${{ github.sha }}`
+          - 构建记录：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          - 安装包见下方 Assets（Windows / macOS / Linux，x86_64 与 aarch64）
+
+          ${{ needs.check-version.outputs.changelog }}
 
   # Publishing step for real-time builds on `master`: collect every platform
   # package and publish them immediately as the official release of the version
@@ -181,26 +259,12 @@ jobs:
   # and manual dispatches stay artifact-only.
   publish-release:
     name: publish-release
-    needs: build
+    needs: [check-version, build]
     if: github.event_name == 'push' && github.ref_type == 'branch'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      with:
-        persist-credentials: false
-
-    - name: Compute release version
-      id: release
-      shell: bash
-      run: |
-        set -eu
-        VERSION="$(sed -n '/<artifactId>pdfsam-parent<\/artifactId>/,/<\/parent>/ s/.*<version>\(.*\)<\/version>.*/\1/p' pdfsam-basic/pom.xml | head -n 1)"
-        [ -n "$VERSION" ] || { echo "could not read the project version"; exit 1; }
-        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-        echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
-
     # Merge every platform artifact into a single directory; the per platform
     # file names carry a distinct classifier, so this cannot collide.
     - name: Download all build artifacts
@@ -219,19 +283,21 @@ jobs:
       uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
-        tag_name: ${{ steps.release.outputs.tag }}
+        tag_name: ${{ needs.check-version.outputs.tag }}
         # Creates the `v<version>` tag on the very commit that was built, even if
         # `master` has moved on while the builds were running.
         target_commitish: ${{ github.sha }}
-        name: "PDFsam Basic ${{ steps.release.outputs.version }}"
+        name: "PDFsam Basic ${{ needs.check-version.outputs.version }}"
         body: |
-          PDFsam Basic ${{ steps.release.outputs.version }} 正式版（多平台自动构建，未签名）。
+          PDFsam Basic ${{ needs.check-version.outputs.version }} 正式版（多平台自动构建，未签名）。
 
           - 构建提交：`${{ github.sha }}`
           - 构建记录：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           - 安装包见下方 Assets（Windows / macOS / Linux，x86_64 与 aarch64）
 
           同一版本号再次构建会覆盖更新本 Release 的 Assets，"Latest" 始终指向 master 上最新一次成功的构建。
+
+          ${{ needs.check-version.outputs.changelog }}
         draft: false
         prerelease: false
         make_latest: true
