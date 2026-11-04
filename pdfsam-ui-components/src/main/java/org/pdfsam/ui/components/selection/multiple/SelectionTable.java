@@ -24,12 +24,15 @@ import javafx.application.Platform;
 import javafx.beans.binding.Bindings;
 import javafx.beans.property.IntegerProperty;
 import javafx.beans.property.SimpleIntegerProperty;
+import javafx.collections.FXCollections;
 import javafx.collections.ListChangeListener.Change;
 import javafx.collections.ObservableList;
+import javafx.collections.ObservableSet;
 import javafx.css.PseudoClass;
 import javafx.geometry.Orientation;
 import javafx.geometry.Point2D;
 import javafx.scene.Scene;
+import javafx.scene.SnapshotParameters;
 import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Label;
 import javafx.scene.control.Menu;
@@ -39,6 +42,7 @@ import javafx.scene.control.SelectionMode;
 import javafx.scene.control.SeparatorMenuItem;
 import javafx.scene.control.TableRow;
 import javafx.scene.control.TableView;
+import javafx.scene.image.Image;
 import javafx.scene.input.Clipboard;
 import javafx.scene.input.ClipboardContent;
 import javafx.scene.input.DataFormat;
@@ -49,6 +53,7 @@ import javafx.scene.input.KeyCodeCombination;
 import javafx.scene.input.KeyCombination;
 import javafx.scene.input.TransferMode;
 import javafx.scene.layout.Region;
+import javafx.scene.paint.Color;
 import javafx.stage.Window;
 import javafx.util.Duration;
 import org.kordamp.ikonli.Ikon;
@@ -85,7 +90,6 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.SortedSet;
 import java.util.TreeSet;
@@ -121,6 +125,7 @@ public class SelectionTable extends TableView<SelectionTableRowData> implements 
             "application/x-java-table-selection-list");
 
     private final String toolBinding;
+    private final ObservableSet<SelectionTableRowData> draggedItems = FXCollections.observableSet();
     private final Label placeHolder = new Label(i18n().tr("Drag and drop PDF files here or use the Add button above"));
     private final PasswordFieldPopup passwordPopup;
     private final IntegerProperty hoverIndex = new SimpleIntegerProperty(-1);
@@ -357,20 +362,33 @@ public class SelectionTable extends TableView<SelectionTableRowData> implements 
         setOnDragExited(this::onDragExited);
         setOnDragDropped(e -> dragConsume(e, this.onDragDropped()));
         if (canMove) {
+            // hidden and unmanaged, it's part of the table so it's styled by the theme and we can snapshot it as drag view
+            var dragViewLabel = new Label();
+            dragViewLabel.getStyleClass().add("selection-table-drag-view");
+            dragViewLabel.setManaged(false);
+            dragViewLabel.setVisible(false);
+            getChildren().add(dragViewLabel);
             setRowFactory(tv -> {
                 TableRow<SelectionTableRowData> row = new TableRow<>();
+                var isDragged = Bindings.createBooleanBinding(() -> draggedItems.contains(row.getItem()), draggedItems,
+                        row.itemProperty());
+                row.opacityProperty().bind(Bindings.when(isDragged).then(0.5).otherwise(1.0));
                 row.setOnDragDetected(e -> {
-                    ArrayList<Integer> selection = new ArrayList<>(getSelectionModel().getSelectedIndices());
+                    var selection = getSelectionModel().getSelectedIndices();
                     if (!row.isEmpty() && !selection.isEmpty()) {
                         Dragboard db = row.startDragAndDrop(TransferMode.MOVE);
-                        db.setDragView(row.snapshot(null, null));
+                        var dragView = dragView(dragViewLabel, selection.size());
+                        db.setDragView(dragView, 0, dragView.getHeight() / 2);
                         ClipboardContent cc = new ClipboardContent();
-                        cc.put(DND_TABLE_SELECTION_MIME_TYPE, selection);
+                        cc.put(DND_TABLE_SELECTION_MIME_TYPE,
+                                selection.stream().map(String::valueOf).collect(Collectors.joining(",")));
                         db.setContent(cc);
+                        draggedItems.addAll(getSelectionModel().getSelectedItems());
                         e.consume();
 
                     }
                 });
+                row.setOnDragDone(e -> draggedItems.clear());
 
                 row.setOnDragOver(e -> {
                     var rowIndex = row.getIndex();
@@ -388,46 +406,23 @@ public class SelectionTable extends TableView<SelectionTableRowData> implements 
                         clearHoverPseudoClasses(row);
                     }
 
-                    if (e.getGestureSource() != row && e.getDragboard().hasContent(DND_TABLE_SELECTION_MIME_TYPE)) {
-                        if (!((List<Integer>) e.getDragboard().getContent(DND_TABLE_SELECTION_MIME_TYPE)).contains(
-                                rowIndex)) {
-                            e.acceptTransferModes(TransferMode.MOVE);
-                            e.consume();
-                        }
+                    if (e.getGestureSource() != row && isDraggedOnOtherRow(e, row)) {
+                        e.acceptTransferModes(TransferMode.MOVE);
+                        e.consume();
                     }
                 });
-                row.setOnDragEntered(e -> {
-                    if (!row.isEmpty() && e.getDragboard().hasContent(DND_TABLE_SELECTION_MIME_TYPE)) {
-                        if (!((List<Integer>) e.getDragboard().getContent(DND_TABLE_SELECTION_MIME_TYPE)).contains(
-                                row.getIndex())) {
-                            row.setOpacity(0.6);
-                        }
-                    }
-                });
-                row.setOnDragExited(e -> {
-                    clearHoverPseudoClasses(row);
-
-                    if (!row.isEmpty() && e.getDragboard().hasContent(DND_TABLE_SELECTION_MIME_TYPE)) {
-                        if (!((List<Integer>) e.getDragboard().getContent(DND_TABLE_SELECTION_MIME_TYPE)).contains(
-                                row.getIndex())) {
-                            row.setOpacity(1);
-                        }
-                    }
-                });
+                row.setOnDragExited(e -> clearHoverPseudoClasses(row));
 
                 row.setOnDragDropped(e -> {
                     clearHoverPseudoClasses(row);
 
-                    Dragboard db = e.getDragboard();
-                    if (db.hasContent(DND_TABLE_SELECTION_MIME_TYPE)) {
+                    var dragged = draggedIndices(e);
+                    if (!dragged.isEmpty()) {
                         Optional<SelectionTableRowData> focus = ofNullable(getFocusModel().getFocusedItem());
                         Optional<SelectionTableRowData> toDrop = of(row).filter(r -> !r.isEmpty())
                                 .map(TableRow::getIndex).map(getItems()::get);
 
-                        List<Integer> dragged = (List<Integer>) e.getDragboard()
-                                .getContent(DND_TABLE_SELECTION_MIME_TYPE);
-                        List<SelectionTableRowData> toMove = dragged.stream().map(getItems()::get)
-                                .filter(Objects::nonNull).toList();
+                        List<SelectionTableRowData> toMove = dragged.stream().map(getItems()::get).toList();
                         getItems().removeAll(toMove);
 
                         int dropIndex = getItems().size();
@@ -456,6 +451,23 @@ public class SelectionTable extends TableView<SelectionTableRowData> implements 
         }
     }
 
+    /**
+     * @return a snapshot of the drag view label, as tall as the row, telling how many files are being dragged
+     */
+    private Image dragView(Label dragViewLabel, int filesCount) {
+        dragViewLabel.setText(filesCount == 1 ?
+                i18n().tr("1 file selected") :
+                i18n().tr("{0} files selected", Integer.toString(filesCount)));
+        // hidden nodes are not rendered, not even in a snapshot. The label is hidden again before the window is repainted
+        dragViewLabel.autosize();
+        dragViewLabel.setVisible(true);
+        var params = new SnapshotParameters();
+        params.setFill(Color.TRANSPARENT);
+        var image = dragViewLabel.snapshot(params, null);
+        dragViewLabel.setVisible(false);
+        return image;
+    }
+
     private static <T> void activateHoverTopPseudoClass(TableRow<T> row) {
         row.pseudoClassStateChanged(DRAG_HOVERED_TOP_ROW_PSEUDO_CLASS, true);
         row.pseudoClassStateChanged(DRAG_HOVERED_BOTTOM_ROW_PSEUDO_CLASS, false);
@@ -469,6 +481,22 @@ public class SelectionTable extends TableView<SelectionTableRowData> implements 
     private static <T> void clearHoverPseudoClasses(TableRow<T> row) {
         row.pseudoClassStateChanged(DRAG_HOVERED_TOP_ROW_PSEUDO_CLASS, false);
         row.pseudoClassStateChanged(DRAG_HOVERED_BOTTOM_ROW_PSEUDO_CLASS, false);
+    }
+
+    private boolean isDraggedOnOtherRow(DragEvent event, TableRow<?> row) {
+        var dragged = draggedIndices(event);
+        return !dragged.isEmpty() && !dragged.contains(row.getIndex());
+    }
+
+    /**
+     * @return the indexes of the dragged rows or an empty list if the drag didn't start on a row of this table, so indexes coming from other tables or
+     * other application instances are never applied to this table's items. The indexes are transferred as a comma-separated String because JavaFX
+     * doesn't reliably deserialize other types put in the {@link Dragboard} using a custom {@link DataFormat}
+     */
+    private List<Integer> draggedIndices(DragEvent event) {
+        var fromThisTable = event.getGestureSource() instanceof TableRow<?> source && source.getTableView() == this;
+        var content = event.getDragboard().getContent(DND_TABLE_SELECTION_MIME_TYPE);
+        return fromThisTable && content instanceof String indices ? Arrays.stream(indices.split(",")).map(Integer::valueOf).toList() : List.of();
     }
 
     private void dragConsume(DragEvent e, Consumer<DragEvent> c) {

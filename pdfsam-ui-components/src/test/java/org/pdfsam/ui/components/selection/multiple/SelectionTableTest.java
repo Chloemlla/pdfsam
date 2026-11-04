@@ -25,6 +25,7 @@ import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
+import javafx.scene.control.TableRow;
 import javafx.scene.input.Clipboard;
 import javafx.scene.input.DataFormat;
 import javafx.scene.input.KeyCode;
@@ -65,6 +66,7 @@ import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
@@ -463,6 +465,39 @@ public class SelectionTableTest {
     }
 
     @Test
+    @Tag("NoHeadless")
+    public void dragRowDown() {
+        robot.clickOn("temp.pdf");
+        robot.drag("temp.pdf").dropTo("temp4.pdf");
+        WaitForAsyncUtils.waitForFxEvents();
+        assertThat(fileNames()).containsExactly("®¯°±²³要选择需要转换的文.pdf", "temp3.pdf", "temp4.pdf", "temp.pdf");
+        assertThat(victim.getSelectionModel().getSelectedIndices()).containsExactly(3);
+    }
+
+    @Test
+    @Tag("NoHeadless")
+    public void dragMultipleRowsUp() {
+        robot.clickOn("temp3.pdf").press(KeyCode.CONTROL).clickOn("temp4.pdf").release(KeyCode.CONTROL);
+        robot.drag("temp4.pdf").dropTo("temp.pdf");
+        WaitForAsyncUtils.waitForFxEvents();
+        assertThat(fileNames()).containsExactly("temp3.pdf", "temp4.pdf", "temp.pdf", "®¯°±²³要选择需要转换的文.pdf");
+        assertThat(victim.getSelectionModel().getSelectedIndices()).containsExactly(0, 1);
+    }
+
+    @Test
+    @Tag("NoHeadless")
+    public void draggedRowsAreDimmedUntilDropped() {
+        robot.clickOn("temp.pdf");
+        robot.drag("temp.pdf").moveTo("temp3.pdf");
+        WaitForAsyncUtils.waitForFxEvents();
+        assertThat(rowOf("temp.pdf").getOpacity()).isLessThan(1);
+        assertThat(rowOf("temp3.pdf").getOpacity()).isEqualTo(1);
+        robot.drop();
+        WaitForAsyncUtils.waitForFxEvents();
+        assertThat(rowOf("temp.pdf").getOpacity()).isEqualTo(1);
+    }
+
+    @Test
     public void moveSelected() {
         robot.clickOn("temp.pdf");
         verifyThat("#victim", (SelectionTable n) -> n.getSelectionModel().getSelectedIndex() == 0);
@@ -627,6 +662,16 @@ public class SelectionTableTest {
         robot.clickOn("temp4.pdf");
         WaitForAsyncUtils.waitForFxEvents();
         assertEquals(item.get().pageSelection.get(), "5");
+    }
+
+    private List<String> fileNames() {
+        return victim.getItems().stream().map(i -> i.descriptor().getFileName()).toList();
+    }
+
+    private TableRow<?> rowOf(String fileName) {
+        return robot.lookup(".table-row-cell").queryAllAs(TableRow.class).stream()
+                .filter(r -> r.getItem() instanceof SelectionTableRowData data && data.descriptor().getFileName().equals(fileName))
+                .findFirst().orElseThrow();
     }
 
     private PdfDocumentDescriptor populate() throws Exception {
